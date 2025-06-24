@@ -1,201 +1,291 @@
-import React, { useEffect, useState, useRef } from "react";
-import io from "socket.io-client";
+import React, { useState, useEffect, useRef } from "react";
 import axios from "axios";
-import { Picker } from "emoji-mart";
-import "emoji-mart/css/emoji-mart.css";
-import ReactMarkdown from "react-markdown";
+import io from "socket.io-client";
 
-const socket = io("https://chat-app-serverorg.onrender.com");
+const SERVER_URL = "https://chat-app-serverorg.onrender.com";
 
-const App = () => {
+const socket = io(SERVER_URL);
+
+function App() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [room, setRoom] = useState("general");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [loginError, setLoginError] = useState("");
+  const [registerError, setRegisterError] = useState("");
+  const [room, setRoom] = useState("global");
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
-  const [privateMessages, setPrivateMessages] = useState({});
-  const [toUser, setToUser] = useState("");
-  const [usersInRoom, setUsersInRoom] = useState([]);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const messagesEndRef = useRef(null);
+  const [users, setUsers] = useState([]);
+  const [dmUser, setDmUser] = useState(null);
+  const [dmMessages, setDmMessages] = useState([]);
+  const dmMessagesRef = useRef([]);
 
   useEffect(() => {
-    if (!isLoggedIn) return;
+    if (isLoggedIn) {
+      socket.emit("join_room", { room, username });
+    }
+  }, [isLoggedIn, room, username]);
 
-    socket.emit("join_room", { room, username });
-
+  useEffect(() => {
     socket.on("receive_message", (data) => {
-      setMessages((prev) => [...prev, data]);
+      if (data.room === room) {
+        setMessages((prev) => [...prev, data]);
+      }
     });
 
-    socket.on("receive_private_message", ({ author, message, timestamp }) => {
-      setPrivateMessages((prev) => ({
-        ...prev,
-        [author]: [...(prev[author] || []), { author, message, timestamp }],
-      }));
+    socket.on("room_users", (usersInRoom) => {
+      setUsers(usersInRoom);
     });
 
-    socket.on("room_users", (users) => {
-      setUsersInRoom(users);
+    socket.on("receive_private_message", (data) => {
+      // Add DM message if it is from or to current user
+      if (
+        (dmUser && data.author === dmUser) ||
+        (dmUser && data.toUsername === username)
+      ) {
+        dmMessagesRef.current = [...dmMessagesRef.current, data];
+        setDmMessages(dmMessagesRef.current);
+      }
     });
 
     return () => {
       socket.off("receive_message");
-      socket.off("receive_private_message");
       socket.off("room_users");
+      socket.off("receive_private_message");
     };
-  }, [room, isLoggedIn]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [room, dmUser, username]);
 
   const handleRegister = async () => {
+    setRegisterError("");
+    if (!username || !password) {
+      setRegisterError("Unesi username i password");
+      return;
+    }
     try {
-      const res = await axios.post("https://chat-app-serverorg.onrender.com/register", {
+      const res = await axios.post(`${SERVER_URL}/register`, {
         username,
         password,
       });
       alert(res.data.message);
-    } catch (err) {
-      alert(err.response?.data?.error || "Greška");
+    } catch (error) {
+      setRegisterError(
+        error.response?.data?.error || "Greška pri registraciji"
+      );
     }
   };
 
   const handleLogin = async () => {
+    setLoginError("");
+    if (!username || !password) {
+      setLoginError("Unesi username i password");
+      return;
+    }
     try {
-      const res = await axios.post("https://chat-app-serverorg.onrender.com/login", {
-        username,
-        password,
-      });
-      alert(res.data.message);
-      setIsLoggedIn(true);
-    } catch (err) {
-      alert(err.response?.data?.error || "Greška");
+      const res = await axios.post(`${SERVER_URL}/login`, { username, password });
+      if (res.data.success) {
+        setIsLoggedIn(true);
+      } else {
+        setLoginError("Pogrešan username ili lozinka");
+      }
+    } catch (error) {
+      setLoginError(error.response?.data?.error || "Greška pri loginu");
     }
   };
 
   const sendMessage = () => {
-    if (!message.trim()) return;
-
-    if (toUser) {
-      socket.emit("send_private_message", {
-        fromUsername: username,
-        toUsername: toUser,
-        message,
-      });
-      setPrivateMessages((prev) => ({
-        ...prev,
-        [toUser]: [...(prev[toUser] || []), { author: username, message }],
-      }));
-    } else {
-      const msgData = {
-        room,
-        author: username,
-        message,
-        timestamp: new Date().toISOString(),
-      };
-      socket.emit("send_message", msgData);
-      setMessages((prev) => [...prev, msgData]);
-    }
+    if (!message) return;
+    const data = {
+      room,
+      author: username,
+      message,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, data]);
+    socket.emit("send_message", data);
     setMessage("");
   };
 
-  const handleEmojiSelect = (emoji) => {
-    setMessage((prev) => prev + emoji.native);
-  };
-
-  const handleRoomChange = (newRoom) => {
-    setRoom(newRoom);
-    setMessages([]);
-    setToUser("");
-  };
-
-  const renderChat = () => {
-    const chatToRender = toUser ? privateMessages[toUser] || [] : messages;
-
-    return (
-      <div style={{ height: "300px", overflowY: "auto", border: "1px solid #ccc", padding: "10px", background: "#fff" }}>
-        {chatToRender.map((msg, index) => (
-          <div key={index}>
-            <strong style={{ color: msg.author === username ? "green" : "black" }}>{msg.author}:</strong>{" "}
-            <ReactMarkdown>{msg.message}</ReactMarkdown>
-          </div>
-        ))}
-        <div ref={messagesEndRef}></div>
-      </div>
-    );
+  const sendPrivateMessage = (msg) => {
+    if (!msg || !dmUser) return;
+    const data = {
+      fromUsername: username,
+      toUsername: dmUser,
+      message: msg,
+    };
+    dmMessagesRef.current = [
+      ...dmMessagesRef.current,
+      { author: username, message: msg, timestamp: new Date().toISOString() },
+    ];
+    setDmMessages(dmMessagesRef.current);
+    socket.emit("send_private_message", data);
   };
 
   if (!isLoggedIn) {
     return (
-      <div style={{ padding: "20px" }}>
-        <h2>Prijava / Registracija</h2>
-        <input placeholder="Korisničko ime" value={username} onChange={(e) => setUsername(e.target.value)} /><br />
-        <input placeholder="Šifra" type="password" value={password} onChange={(e) => setPassword(e.target.value)} /><br />
-        <button onClick={handleRegister}>Registruj se</button>
-        <button onClick={handleLogin}>Prijavi se</button>
+      <div style={{ maxWidth: 400, margin: "auto", padding: 20 }}>
+        <h2>Login / Register</h2>
+        <input
+          type="text"
+          placeholder="Username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ width: "100%", marginBottom: 10 }}
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          style={{ width: "100%", marginBottom: 10 }}
+        />
+        <button onClick={handleLogin} style={{ marginRight: 10 }}>
+          Login
+        </button>
+        <button onClick={handleRegister}>Register</button>
+        {loginError && <p style={{ color: "red" }}>{loginError}</p>}
+        {registerError && <p style={{ color: "red" }}>{registerError}</p>}
       </div>
     );
   }
 
   return (
-    <div style={{ padding: "20px" }}>
+    <div style={{ maxWidth: 700, margin: "auto", padding: 20 }}>
       <h2>Dobrodošao, {username}</h2>
 
-      <div>
-        <strong>Izaberi sobu:</strong>
-        {["general", "programiranje", "igre", "filmovi"].map((r) => (
-          <button key={r} onClick={() => handleRoomChange(r)} disabled={room === r}>
-            {r}
-          </button>
-        ))}
-      </div>
+      <div style={{ display: "flex", gap: 20 }}>
+        {/* Users list */}
+        <div
+          style={{
+            border: "1px solid gray",
+            padding: 10,
+            width: 150,
+            height: 400,
+            overflowY: "auto",
+          }}
+        >
+          <h3>Korisnici u sobi</h3>
+          <ul style={{ listStyle: "none", padding: 0 }}>
+            {users.map((user) => (
+              <li
+                key={user}
+                style={{
+                  cursor: "pointer",
+                  fontWeight: user === dmUser ? "bold" : "normal",
+                }}
+                onClick={() => setDmUser(user === dmUser ? null : user)}
+              >
+                {user} {user === username ? "(Ti)" : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
 
-      <div>
-        <strong>Korisnici u sobi:</strong>
-        <ul>
-          {usersInRoom.map((user) => (
-            <li
-              key={user}
-              style={{
-                fontWeight: user === username ? "bold" : "normal",
-                cursor: user !== username ? "pointer" : "default",
-              }}
-              onClick={() => user !== username && setToUser(user)}
-            >
-              {user} {user === username && "(ti)"}
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      <div>
-        <strong>{toUser ? `Privatni razgovor sa ${toUser}` : `Soba: ${room}`}</strong>
-        <button onClick={() => setToUser("")} disabled={!toUser}>Vrati se u sobu</button>
-      </div>
-
-      {renderChat()}
-
-      <div>
-        <textarea
-          rows="3"
-          style={{ width: "100%", marginTop: "10px" }}
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          placeholder="Unesi poruku..."
-        />
-        <button onClick={() => setShowEmojiPicker((prev) => !prev)}>😀</button>
-        <button onClick={sendMessage}>Pošalji</button>
-        {showEmojiPicker && (
-          <div style={{ position: "absolute", zIndex: 999 }}>
-            <Picker onSelect={handleEmojiSelect} />
-          </div>
-        )}
+        {/* Main chat or DM */}
+        <div
+          style={{
+            border: "1px solid gray",
+            padding: 10,
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            height: 400,
+          }}
+        >
+          {dmUser ? (
+            <>
+              <h3>DM sa {dmUser}</h3>
+              <div
+                style={{
+                  flex: 1,
+                  overflowY: "auto",
+                  border: "1px solid #ccc",
+                  padding: 10,
+                  marginBottom: 10,
+                }}
+              >
+                {dmMessages.map((msg, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      textAlign: msg.author === username ? "right" : "left",
+                      marginBottom: 5,
+                    }}
+                  >
+                    <b>{msg.author}: </b> {msg.message}
+                  </div>
+                ))}
+              </div>
+              <SendMessageInput
+                onSend={(msg) => sendPrivateMessage(msg)}
+                placeholder="Pošalji DM poruku..."
+              />
+              <button onClick={() => setDmUser(null)} style={{ marginTop: 5 }}>
+                Zatvori DM
+              </button>
+            </>
+          ) : (
+            <>
+              <h3>Javni chat - soba: {room}</h3>
+              <div
+                style={{
+                  flex: 1,
+                  overflowY: "auto",
+                  border: "1px solid #ccc",
+                  padding: 10,
+                  marginBottom: 10,
+                }}
+              >
+                {messages.map((msg, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      textAlign: msg.author === username ? "right" : "left",
+                      marginBottom: 5,
+                    }}
+                  >
+                    <b>{msg.author}: </b> {msg.message}
+                  </div>
+                ))}
+              </div>
+              <SendMessageInput
+                onSend={(msg) => {
+                  setMessage(msg);
+                  sendMessage();
+                }}
+                placeholder="Pošalji poruku..."
+              />
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
-};
+}
+
+function SendMessageInput({ onSend, placeholder }) {
+  const [input, setInput] = useState("");
+
+  const handleSend = () => {
+    if (!input.trim()) return;
+    onSend(input.trim());
+    setInput("");
+  };
+
+  return (
+    <div style={{ display: "flex", gap: 10 }}>
+      <input
+        type="text"
+        value={input}
+        placeholder={placeholder}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") handleSend();
+        }}
+        style={{ flex: 1 }}
+      />
+      <button onClick={handleSend}>Pošalji</button>
+    </div>
+  );
+}
 
 export default App;
